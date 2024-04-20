@@ -7,16 +7,24 @@
 
 (def def-pojo-args
   [:schema {:registry
-            {:props         [:map
-                             [:pojo-name :symbol]]
-             :def-pojo-args [:catn
-                             [:name :symbol]
-                             [:props :props]
-                             [:schema [:fn (fn [s]
-                                             (-> s
-                                                 (m/schema)
-                                                 (m/type)
-                                                 (= :map)))]]]}}
+            {:annotation-map :map
+             :annotations    [:map
+                              [:class {:optional true} :map]
+                              [:getter {:optional true} [:map-of :keyword :annotation-map]]
+                              [:setter {:optional true} [:map-of :keyword :annotation-map]]]
+             :props          [:map
+                              [:class-name :symbol]
+                              [:annotations {:optional true} :annotations]]
+             :def-pojo-args  [:catn
+                              [:name :symbol]
+                              [:props :props]
+                              [:schema [:fn {:error/fn (fn [s]
+                                                         (str s " is not a valid map schema"))}
+                                        (fn [s]
+                                          (-> s
+                                              (m/schema)
+                                              (m/type)
+                                              (= :map)))]]]}}
    :def-pojo-args])
 
 (defn- -seq-schema? [st]
@@ -47,95 +55,81 @@
       (-set-schema? schema-type) Set
       (-prim? schema-type) (get -prim-types schema-type))))
 
+(defn pojo* [{:keys [name props schema]}]
+  (let [prefix (str "-" (gensym) "-")
+        with-prefix (fn [name]
+                      (symbol (str prefix name)))
+
+        {:keys [class-name annotations]} props
+        {class-annotations  :class
+         getter-annotations :getter
+         setter-annotations :setter} annotations
+        class-name (or class-name (csk/->PascalCaseSymbol name))
+        init-name (with-prefix 'init)
+
+        attributes (->> schema
+                        (m/children)
+                        (map (fn [[k _props v]]
+                               [k {:field-name        (csk/->camelCaseString k)
+                                   :getter-method-sym (symbol (str "get" (csk/->PascalCaseString k)))
+                                   :setter-method-sym (symbol (str "set" (csk/->PascalCaseString k)))
+                                   :field-type        (malli-schema->java-type v)}]))
+                        (into {}))
+
+        getter-defs (->> attributes
+                         (mapv (fn [[k {:keys [getter-method-sym field-type]}]]
+                                 [(with-meta getter-method-sym
+                                             (get getter-annotations k)) [] field-type])))
+
+        setter-defs (->> attributes
+                         (mapv (fn [[k {:keys [setter-method-sym field-type]}]]
+                                 [(with-meta setter-method-sym
+                                             (get setter-annotations k)) [field-type] 'void])))
 
 
-(defmacro defpojo [& args]
+        getters-impl (->> attributes
+                          (map (fn [[k {:keys [getter-method-sym]}]]
+                                 `(defn ~(with-prefix getter-method-sym) ~'[this]
+                                    (get @(.state ~'this) ~k)))))
+
+        setters-impl (->> attributes
+                          (map (fn [[k {:keys [setter-method-sym]}]]
+                                 `(defn ~(with-prefix setter-method-sym) ~'[this value]
+                                    (swap! (.state ~'this) assoc ~k ~'value)))))]
+    `(do
+
+       (gen-class
+         :name ~(with-meta class-name
+                           class-annotations)
+         :prefix ~prefix
+         :state "state"
+         :init "init"
+         :constructors ([])
+         :main false
+         :methods [~@getter-defs
+                   ~@setter-defs])
+
+       (defn ~init-name []
+         [[] (atom {})])
+
+       ~@getters-impl
+
+       ~@setters-impl)))
+
+(defmacro pojo [& args]
   (let [parsed-args (m/parse def-pojo-args args)]
     (when (= ::m/invalid parsed-args)
       (let [explanation (m/explain def-pojo-args parsed-args)
             human-explanation (first (me/humanize explanation))]
         (throw (ex-info human-explanation explanation))))
-    (let [{:keys [name props schema]} parsed-args
-          {:keys [pojo-name interface-name]} props
-          pojo-name (or pojo-name (csk/->PascalCaseSymbol name))
-          interface-name (or interface-name (symbol (str "I" pojo-name)))
-          attributes (->> schema
-                          (m/children)
-                          (map (fn [[k _props v]]
-                                 [k {:field-name        (csk/->camelCaseString k)
-                                     :getter-method-sym (symbol (str "get" (csk/->PascalCaseString k)))
-                                     :setter-method-sym (symbol (str "set" (csk/->PascalCaseString k)))
-                                     :field-type        (malli-schema->java-type v)}]))
-                          (into {}))
-          interface-getters (->> attributes
-                                 (map (fn [[_k {:keys [getter-method-sym field-type]}]]
-                                        (list (with-meta getter-method-sym {:tag field-type}) []))))
+    (pojo* parsed-args)))
 
-          interface-setters (->> attributes
-                                 (map (fn [[_k {:keys [setter-method-sym field-type]}]]
-                                        (list (with-meta setter-method-sym {:tag 'void})
-                                              [(with-meta 'val {:tag field-type})]))))
+(defmacro defpojo [& [name _ schema :as args]]
+  `(do
 
-          getters-impl (->> attributes
-                            (map (fn [[k {:keys [getter-method-sym]}]]
-                                   `(~getter-method-sym [~'_this]
-                                      ~(symbol k)))))
+     (pojo ~@args)
 
-          setters-impl (->> attributes
-                            (map (fn [[k {:keys [setter-method-sym]}]]
-                                   `(~setter-method-sym [~'_this ~'val]
-                                      (set! ~(symbol k) ~'val)))))
+     (def ~name ~schema)))
 
-          deftype-props (->> attributes
-                             (map (fn [[_k {:keys [field-name]}]]
-                                    (with-meta (symbol field-name)
-                                               {:unsynchronized-mutable true}))))]
-      `(do
-         (definterface ~interface-name
-           ~@interface-getters
-           ~@interface-setters)
-
-         (deftype ~pojo-name [~@deftype-props]
-           ~interface-name
-           ~@getters-impl
-           ~@setters-impl)
-
-         (def ~name ~schema)))))
-
-
-
-(comment
-
-  (m/children
-    [:map
-     [:id :int]
-     [:name :string]])
-
-  (macroexpand-1
-    '(defpojo user
-       {:pojo-name User}
-       [:map
-        [:id :int]
-        [:name :string]]))
-
-
-  (compile 'conjurernix.malli-pojo.api)
-  )
-
-(defpojo user
-  {:pojo-name User}
-  [:map
-   [:id :int]
-   [:name :string]])
-
-(deftype Account [^String name
-                  ^int balance
-                  ^boolean active])
-
-(definterface IAccount
-  (^String getName [])
-  (^void setName [^String s]))
-
-(defrecord Person [id ^String name])
 
 
