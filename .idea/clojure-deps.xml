@@ -7,6 +7,12 @@
         <option value="test" />
       </set>
     </option>
+    <option name="toolAliases">
+      <set>
+        <option value="build" />
+        <option value="deps" />
+      </set>
+    </option>
   </component>
   <component name="DepsProjectsManager">
     <option name="projectFiles">
