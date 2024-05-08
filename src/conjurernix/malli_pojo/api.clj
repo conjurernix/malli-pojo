@@ -1,6 +1,5 @@
 (ns conjurernix.malli-pojo.api
   (:require [camel-snake-kebab.core :as csk]
-            [hashp.core]
             [malli.core :as m]
             [malli.error :as me])
   (:import (java.util List Set UUID)))
